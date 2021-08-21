@@ -163,8 +163,8 @@ void isotp_send_to(int can, char *data, int size, int dest) {
   if(size > 256) return;
   frame.can_id = dest;
   if(size < 7) {
-    frame.len = size + 1;
-    frame.data[0] = size;
+    frame.len = size;
+    frame.data[0] = size - 1;
     memcpy(&frame.data[1], data, size);
     nbytes = write(can, &frame, CAN_MTU);
     if(nbytes < 0) perror("Write packet");
@@ -362,13 +362,22 @@ unsigned char calc_vin_checksum(char *vin, int size) {
   return ('0' + checksum);
 }
 
+void send_error_iml(int can, struct canfd_frame frame){
+  char resp[4];
+  if(verbose) plog("Responded with Incorrect Message Length\n");
+  resp[0] = 0x7f;
+  resp[1] = frame.data[1];
+  resp[2] = 0x13; // incorrectMessageLengthOrInvalidFormat
+  isotp_send(can, resp, 4);
+}
+
 void send_error_snfs(int can, struct canfd_frame frame) {
   char resp[4];
   if(verbose) plog("Responded with Sub Function Not Supported\n");
   resp[0] = 0x7f;
   resp[1] = frame.data[1];
-  resp[2] = 12; // SubFunctionNotSupported
-  isotp_send(can, resp, 3);
+  resp[2] = 0x12; // SubFunctionNotSupported
+  isotp_send(can, resp, 4);
 }
 
 void send_error_roor(int can, struct canfd_frame frame, int id) {
@@ -495,6 +504,31 @@ void handle_current_data(int can, struct canfd_frame frame) {
       if(verbose) plog("Note: Requested unsupported service %02X\n", frame.data[2]);
       break;
   }
+}
+
+void handle_ecu_reset(int can, struct canfd_frame frame) {
+  char *buf;
+  int pktsize = 0;
+  unsigned char chksum;
+  if(verbose) plog("Received Vehicle info request\n");
+  char resp[300];
+  switch(frame.data[2]) {
+    case 0x01:
+      resp[0] = frame.data[1] + 0x40;
+      resp[1] = frame.data[2];
+      resp[2] = 0x51;
+      isotp_send_to(can, resp, 3, 0x77a);
+      break;
+    case 0x03:
+      resp[0] = frame.data[1] + 0x40;
+      resp[1] = frame.data[2];
+      resp[2] = 0x51;
+      isotp_send_to(can, resp, 3, 0x77a);
+      break;
+    default:
+      send_error_snfs(can, frame);
+  }
+    
 }
 
 void handle_vehicle_info(int can, struct canfd_frame frame) {
@@ -667,6 +701,14 @@ void handle_read_data_by_id(int can, struct canfd_frame frame) {
           frame.data[6] = 0x31; //1
           frame.data[7] = 0x30; //0
           write(can, &frame, CAN_MTU);
+        break;
+      case 0x90:  // VIN
+        if(verbose) plog(" + Requested VIN\n");
+        if(verbose) plog("Sending VIN %s\n", vin);
+        resp[0] = frame.data[1] + 0x40;
+        resp[1] = frame.data[2];
+        memcpy(&resp[2], vin, strlen(vin));
+        isotp_send_to(can, resp, 3 + strlen(vin), 0x644);
         break;
       case 0x9E:
         if(verbose) plog("Read data by ID 0x9E\n");
@@ -1282,12 +1324,23 @@ void print_bin(unsigned char *bin, int size) {
   plog("\n");
 }
 
+int check_pkt_length(int can, struct canfd_frame frame){
+  int counter = 0;
+  for(int i=0; i<8; i++){
+    if(frame.data[i] != 0x00){
+      counter++;
+    }
+  }
+  return counter;
+}
+
 // Handles the incomming CAN Packets
 // Each ID that deals with specific controllers a note is
 // given where that info came from.  There could be a lot of overlap
 // and exceptions here. -- Craig
 void handle_pkt(int can, struct canfd_frame frame) {
   if(DEBUG) print_pkt(frame);
+  int size = check_pkt_length(can,frame)-1;
   switch(frame.can_id) {
     case 0x243: // EBCM / GM / Chevy Malibu 2006
       switch(frame.data[1]) {
@@ -1310,24 +1363,33 @@ void handle_pkt(int can, struct canfd_frame frame) {
         flow_control_push_to(can, 0x644);
         return;
       }
-      switch(frame.data[1]) {
-        case UDS_SID_TESTER_PRESENT:
-          if(verbose > 1) plog("Received TesterPresent\n");
-          generic_OK_resp_to(can, frame, 0x644);
+      if (frame.data[0] != size) {
+        send_error_iml(can,frame);
+        return;
+      }
+      else{
+        switch(frame.data[1]) {
+          case UDS_SID_READ_DATA_BY_ID:
+          handle_read_data_by_id(can, frame);
           break;
-        case UDS_SID_GM_READ_DIAG_INFO:
-          handle_gm_read_diag(can, frame);
-          break;
-        case UDS_SID_GM_READ_DATA_BY_ID:
-          handle_gm_read_data_by_id(can, frame);
-          break;
-        case UDS_SID_GM_READ_DID_BY_ID:
-          handle_gm_read_did_by_id(can, frame);
-          break;
-        default:
-          if(verbose) print_pkt(frame);
-          if(verbose) plog("Unhandled mode/sid: %s\n", get_mode_str(frame));
-          break;
+          case UDS_SID_TESTER_PRESENT:
+            if(verbose > 1) plog("Received TesterPresent\n");
+            generic_OK_resp_to(can, frame, 0x644);
+            break;
+          case UDS_SID_GM_READ_DIAG_INFO:
+            handle_gm_read_diag(can, frame);
+            break;
+          case UDS_SID_GM_READ_DATA_BY_ID:
+            handle_gm_read_data_by_id(can, frame);
+            break;
+          case UDS_SID_GM_READ_DID_BY_ID:
+            handle_gm_read_did_by_id(can, frame);
+            break;
+          default:
+            if(verbose) print_pkt(frame);
+            if(verbose) plog("Unhandled mode/sid: %s\n", get_mode_str(frame));
+            break;
+        }
       }
       break;
     case 0x24A: // Power Steering / GM / Chevy Malibu 2006
@@ -1353,7 +1415,15 @@ void handle_pkt(int can, struct canfd_frame frame) {
       if(frame.data[0] == 0x30 && gBufLengthRemaining > 0) flow_control_push(can);
       if(frame.data[0] == 0 || frame.len == 0) return;
       if(frame.data[0] > frame.len) return;
+      if (frame.data[0] != size) {
+        send_error_iml(can,frame);
+        return;
+      } 
+      else{
       switch (frame.data[1]) {
+        case UDS_SID_ECU_RESET:
+          handle_ecu_reset(can,frame);
+          break;
         case OBD_MODE_SHOW_CURRENT_DATA:
           handle_current_data(can, frame);
           break;
@@ -1395,6 +1465,7 @@ void handle_pkt(int can, struct canfd_frame frame) {
       if (DEBUG) print_pkt(frame);
       if (DEBUG) plog("DEBUG: missed ID %02X\n", frame.can_id);
       break;
+  }
   }
 }
 
