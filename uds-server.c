@@ -162,7 +162,7 @@ void isotp_send_to(int can, char *data, int size, int dest) {
   int nbytes;
   if(size > 256) return;
   frame.can_id = dest;
-  if(size < 7) {
+  if(size <= 7) {
     frame.len = size;
     frame.data[0] = size - 1;
     memcpy(&frame.data[1], data, size);
@@ -184,7 +184,7 @@ void isotp_send_to(int can, char *data, int size, int dest) {
     counter = 0x21;
     if(no_flow_control) {
       while(left > 0) {
-        if(left > 7) {
+        if(left >= 7) {
           frame.len = 8;
           frame.data[0] = counter;
           memcpy(&frame.data[1], data+(size-left), 7);
@@ -507,11 +507,8 @@ void handle_current_data(int can, struct canfd_frame frame) {
 }
 
 void handle_ecu_reset(int can, struct canfd_frame frame) {
-  char *buf;
-  int pktsize = 0;
-  unsigned char chksum;
-  if(verbose) plog("Received Vehicle info request\n");
-  char resp[300];
+  if(verbose) plog("Received ECU Reset request\n");
+  char resp[8];
   switch(frame.data[2]) {
     case 0x01:
       resp[0] = frame.data[1] + 0x40;
@@ -551,7 +548,7 @@ void handle_vehicle_info(int can, struct canfd_frame frame) {
     case 0x02: // Get VIN
       switch(fuzz_level) {
         case 0:
-          if(verbose) plog("Sending VIN %s\n", vin);
+          if(verbose) plog("Sending VIN LocateVIN\n");
           resp[0] = frame.data[1] + 0x40;
           resp[1] = frame.data[2];
           resp[2] = 1;
@@ -670,6 +667,17 @@ void handle_read_data_by_id(int can, struct canfd_frame frame) {
   char resp[120];
   if(frame.data[2] == 0xF1) {
     switch(frame.data[3]) {
+    case 0x80:
+      if(verbose) plog("Read data by ID 0x80\n");
+      resp[0] = frame.data[1] + 0x40;
+      resp[1] = frame.data[2];
+      resp[2] = frame.data[3];
+      resp[3] = 0x43;
+      resp[4] = 0x53;
+      resp[5] = 0x51;
+      resp[6] = 0x21;
+      isotp_send_to(can, resp, 8, 0x77a);
+      break;
      case 0x87:
        if(verbose) plog("Read data by ID 0x87\n");
        resp[0] = frame.data[1] + 0x40;
@@ -704,11 +712,12 @@ void handle_read_data_by_id(int can, struct canfd_frame frame) {
         break;
       case 0x90:  // VIN
         if(verbose) plog(" + Requested VIN\n");
-        if(verbose) plog("Sending VIN %s\n", vin);
+        if(verbose) plog("Sending VIN LocateVIN\n");
         resp[0] = frame.data[1] + 0x40;
         resp[1] = frame.data[2];
-        memcpy(&resp[2], vin, strlen(vin));
-        isotp_send_to(can, resp, 3 + strlen(vin), 0x644);
+        resp[2] = frame.data[3];
+        memcpy(&resp[4], vin, strlen(vin));
+        isotp_send_to(can, resp, 4 + strlen(vin), 0x77a);
         break;
       case 0x9E:
         if(verbose) plog("Read data by ID 0x9E\n");
@@ -819,7 +828,7 @@ void handle_gm_read_did_by_id(int can, struct canfd_frame frame) {
       if(verbose) plog(" + Requested VIN\n");
       switch(fuzz_level) {
         case 0:
-          if(verbose) plog("Sending VIN %s\n", vin);
+          if(verbose) plog("Sending VIN LocateVIN\n");
           resp[0] = frame.data[1] + 0x40;
           resp[1] = frame.data[2];
           memcpy(&resp[2], vin, strlen(vin));
@@ -1326,7 +1335,7 @@ void print_bin(unsigned char *bin, int size) {
 
 int check_pkt_length(int can, struct canfd_frame frame){
   int counter = 0;
-  for(int i=0; i<8; i++){
+  for(int i=0; i<frame.len; i++){
     if(frame.data[i] != 0x00){
       counter++;
     }
