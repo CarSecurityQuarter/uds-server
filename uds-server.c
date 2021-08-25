@@ -152,7 +152,7 @@ void flow_control_push_to(int can, int id) {
 }
 
 void flow_control_push(int can) {
-  flow_control_push_to(can, 0x7e8);
+  flow_control_push_to(can, 0x77A);
 }
 
 void isotp_send_to(int can, char *data, int size, int dest) {
